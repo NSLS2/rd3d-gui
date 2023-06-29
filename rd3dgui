@@ -1,0 +1,3 @@
+#!/bin/bash
+#/opt/conda_envs/lsdc-gui-2023-2-latest/bin/python ./rd3dgui.py&
+/nsls2/conda/envs/2023-2.0-py310/bin/python ./rd3dgui.py&

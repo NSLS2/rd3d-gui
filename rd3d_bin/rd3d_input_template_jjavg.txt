@@ -1,0 +1,39 @@
+##############################################################################
+#                                 Crystal Block                              #
+##############################################################################
+CRYSTAL
+TYPE CUBOID
+DIMENSION 20.0 20.0 20.0
+#ABSCOEFCALC AVERAGE  # Assume an absorption coeﬃcient of 0.237 mm−1 and an
+                      # attenuation coeﬃcient of 0.281 mm−1
+                      # These values are representative of an average crystal
+                      # at an incident X-ray beam energy of 12.4 keV
+#ABSCOEFCALC EXP  # This tells RADDOSE-3D that it should expect a PDB file
+#PDB 2vb1.pdb         # PDB Code: HEWL 0.65 Ang
+#PDB 2VB1         # PDB Code: HEWL 0.65 Ang
+ABSCOEFCALC RD3D  # Use RADDOSE-3D to calculate AbsCoeff
+UNITCELL 125 125 125 90 90 90
+NUMMONOMERS 3 # Number of monomers in the unit cell
+NUMRESIDUES 250 # Number of amino acid residues per monomer
+#PROTEINHEAVYATOMS S 20 # Number of heavy atoms per monomer
+#SOLVENTHEAVYCONC Na 1000 Cl 1000  # [mM]
+PIXELSPERMICRON 2.0
+
+##############################################################################
+#                                  Beam Block                                #
+##############################################################################
+BEAM
+TYPE GAUSSIAN
+FWHM 1.0 3.0
+COLLIMATION RECTANGULAR 10.0 10.0
+                               # For Tophat this is the size
+ENERGY 12.66
+FLUX 3.5e+12
+
+##############################################################################
+#                                  Wedge Block                               #
+##############################################################################
+WEDGE 0 0.0
+ANGULARRESOLUTION 2.0
+EXPOSURETIME 1.000
+TRANSLATEPERDEGREE 0.0 0.0 0.0
