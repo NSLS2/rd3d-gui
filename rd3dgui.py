@@ -3,22 +3,33 @@
 RD3D_calc Raddose3D interface
 New version, calling raddose3d v4.0.xxx
 
-
 ### Todo
+* Expose all crystal sizes
+  * TEST in fmx_dose4, add argument xtalSizeB along beam. If -1 dimZ=dimX
+  * TEST in GUI add xtalSizeB edit field
+* Expose crystal angle
+* TEST Replace line: Replace if it exists, throw a warning in the text field if it doesn't
 * Package / Git
-* get_beam_size() - catch no epics
+* get_beam_size()
+  * catch no epics
   * if V1H1
     * interpolate size(E)
   * elif T_BCU < 1
     * 5x3
   * else 3x1.5
-* GUI
-  * Plot isosurface
+* TEST Plot isosurface
+  * Use rd3d_paths() to point ot rd3d_DoseState.csv
 * Refactor Notebook functions
   * fmx_dose
     * Add histogram
   * expose_to_dose
-  
+* Remove diagnostic printouts
+* Paths
+  * pathlib is OS agnostic, consider using it.
+  * Harmonize different ways to call rd3d_paths. Search "_paths", and check the GPT-4 hints
+  * check rd3d_bin error when loading pdb file in earlier version on BNL surfaace Pro 9 (PDB code worked)
+  * Symbolic links to overcome path length? Is it path length or the spaces in the BNL onedrive dir?
+    Try a parallel dir with underscores for spaces - if that is fine, it's the spaces, else the path length
 """
 
 import subprocess
@@ -37,12 +48,15 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLineEdit, QLabel, QComboBox, QTextEdit, QFrame, QFileDialog
+from PyQt5.QtWidgets import QMainWindow
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QDir, QSettings
+from PyQt5.QtWebEngineWidgets import QWebEngineView
 
-#import fileinput
-#import matplotlib.pyplot as plt
-#from PyQt5.QtCore import Qt
+from skimage import measure
+import plotly.graph_objects as go
+from plotly import io
+from plotly.colors import get_colorscale
 
 def rd3d_paths(templateFileName = "rd3d_input_template.txt"):
     """
@@ -50,13 +64,19 @@ def rd3d_paths(templateFileName = "rd3d_input_template.txt"):
     
     templateFileName hand-over allows to use different template files
     """
-    rd3d_bin_dir = "rd3d_bin"
-    rd3d_work_dir = "rd3d_work"
+    script_dir = os.path.dirname(os.path.realpath(__file__))  # script's own directory
+
+    rd3d_bin_dir = os.path.join(script_dir, "rd3d_bin")
+    rd3d_work_dir = os.path.join(os.getcwd(), "rd3d_work")  # current directory
+    # rd3d_work_dir = os.path.join(os.path.expanduser('~'), "rd3d_work")  # user's home directory
     
+    if not os.path.exists(rd3d_work_dir):
+        os.makedirs(rd3d_work_dir)
+
     inputFileName = "rd3d_input.txt"
     outputFileName = "rd3d_Summary.csv"
     summaryFileName = "rd3d_Summary.txt"
-    
+    doseStateFileName = "rd3d_DoseState.csv"   
     return {
         "binDir": rd3d_bin_dir,
         "workDir": rd3d_work_dir,
@@ -64,18 +84,25 @@ def rd3d_paths(templateFileName = "rd3d_input_template.txt"):
         "inputFilePath": os.path.join(rd3d_work_dir, inputFileName),
         "outputFilePath": os.path.join(rd3d_work_dir, outputFileName),
         "summaryFilePath": os.path.join(rd3d_work_dir, summaryFileName),
+        "doseStateFilePath": os.path.join(rd3d_work_dir, doseStateFileName),
     }
-
+    
 def rd3d_replaceLine(file, searchExp, replaceExp):
+    found = False  # Variable to keep track if searchExp is found in the file
+
     with open(file, 'r') as f:
         lines = f.readlines()
 
     with open(file, 'w') as f:
         for line in lines:
-            # Use startswith(), then a line can be commented out using '#'
             if line.startswith(searchExp):
                 line = replaceExp
+                found = True  # Update the found variable when searchExp is found
             f.write(line)
+
+    # If searchExp is not found in the file, raise an exception
+    if not found:
+        raise ValueError(f"'{searchExp}' not found in the template file. Please use a template file that contains a line with '{searchExp}'")
         
 def verify_pdb_file(file_path):
     """Verify that a string is a valid path to a '.pdb' file and that the file can be opened.
@@ -184,12 +211,18 @@ def rd3d_calc4(flux=3.5e12, energy=12.66,
     print(templateFileName)
     print(verbose)
     
-    paths=rd3d_paths(templateFileName = templateFileName)
+    paths = rd3d_paths(templateFileName = templateFileName)
+
+    # Create work directory if not exists
+    os.makedirs(paths['workDir'], exist_ok=True)
+
     copyfile(paths['templateFilePath'], paths['inputFilePath'])
     
     # Clear log file
-    with open(os.path.join(paths['workDir'], 'rd3d_calc4.log'), 'w') as log_file:
-        pass
+    log_file_path = os.path.join(paths['workDir'], 'rd3d_calc4.log')
+    with open(log_file_path, 'w') as log_file:
+        log_file.truncate(0)
+    # The file is automatically closed when the 'with' block is exited
     
     # Set up logging
     logging.basicConfig(filename=os.path.join(paths['workDir'], 'rd3d_calc4.log'),
@@ -221,8 +254,11 @@ def rd3d_calc4(flux=3.5e12, energy=12.66,
         print("Cannot verify PDB model. Using local lysozyme model 2vb1.pdb.")
         rd3d_replaceLine(paths['inputFilePath'], "PDB", f'PDB {os.path.join(paths["binDir"], "2vb1.pdb")}\n')
             
-    prc = subprocess.run(["java", "-jar", "rd3d_bin/raddose3d_4.jar",
-                          "-i", paths['inputFilePath'], "-p", "rd3d_work/rd3d_"],
+    # Get absolute path to jar file
+    jar_path = os.path.join(paths['binDir'], "raddose3d_4.jar")
+    
+    prc = subprocess.run(["java", "-jar", jar_path,
+                          "-i", paths['inputFilePath'], "-p", paths['workDir'] + "/rd3d_"],
                          capture_output=True, universal_newlines=True)
     
     logging.info(prc.stdout)  # log output to file
@@ -257,7 +293,7 @@ def get_flux_at_sample():
 
 def fmx_dose4(flux = 4e12, energy = 12.66,
               beamsizeV = 1.0, beamsizeH = 2.0,
-              xtalSizeV = -1,
+              xtalSizeV = -1, xtalSizeB = -1,
               oscRange = 180, oscWidth = 0.1, exposureTimeFrame = 0.01,
               vectorL = 50,
               pdb = '2vb1.pdb',
@@ -287,8 +323,12 @@ def fmx_dose4(flux = 4e12, energy = 12.66,
     Beam size (V, H) [um]. Default 1x2 (VxH). For now, set explicitly.
     
     xtalSizeV: float
-    Crystal size (V) [um]. Default 1x2 (VxH). For now, set explicitly.
-    If set to -1 this value = beamsizeV.
+    Crystal size (V) [um]. If set to -1 this value = beamsizeV.
+    Default -1
+    
+    xtalSizeB: float
+    Crystal size (B along beam) [um]. If set to -1 this value = xtalSizeV.
+    Default -1
     
     vectorL: float
     Vector length [um]: Make assumption that the vector is completely oriented along X-axis.
@@ -376,7 +416,10 @@ def fmx_dose4(flux = 4e12, energy = 12.66,
     else:                       # Crystal dimension V [um].
         dimX = xtalSizeV
     dimY = vectorL + beamsizeH  # Crystal dimension H [um]. Set to longer than vector in H
-    dimZ = dimX                 # Crystal dimension along beam [um]
+    if xtalSizeB == -1:         # Match to xtalSizeV
+        dimZ = dimX   
+    else:                       # Crystal dimension B along beam [um].
+        dimZ = xtalSizeB
     
     rd3d_out = rd3d_calc4(flux=fluxSample, energy=energy,
                           fwhmX=fwhmX, fwhmY=fwhmY,
@@ -416,6 +459,165 @@ class PlotCanvas(FigureCanvas):
             label.set_rotation(45)
         self.figure.subplots_adjust(bottom=0.25)  # Adjust bottom margin
         self.draw()
+        
+class IsosurfaceVisualizationApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setGeometry(100, 100, 800, 600)
+        self.setWindowTitle("rd3d isosurface")
+
+        self.filePath = rd3d_paths()['doseStateFilePath']
+        
+        self.labels = {'Mesh 1': ['Dose Level 1 [MGy]', 'Alpha 1'],
+                       'Mesh 2': ['Dose Level 2 [MGy]', 'Alpha 2']}
+        self.func_args = {'Mesh 1': ['doseLevel1', 'alpha1'],
+                          'Mesh 2': ['doseLevel2', 'alpha2']}
+        self.default_values = {'Mesh 1': ['15', '0.7'],
+                               'Mesh 2': ['1', '0.2']}
+        self.color_maps = ['viridis', 'blackbody', 'bluered', 'blues', 'blugrn', 'cividis', 'deep', 'electric', 'gray', 'hot', 'hsv', 'ice', 'icefire', 'inferno', 'jet', 'magma', 'plasma', 'rainbow', 'spectral']
+
+        self.fileLabel = QLabel(self.filePath, self)
+        self.fileLabel.setMinimumHeight(20)
+
+        self.browseButton = QPushButton("Browse", self)
+        self.browseButton.setMinimumHeight(20)
+        self.browseButton.clicked.connect(self.browseDoseStateFile)
+
+        self.plotButton = QPushButton("Plot", self)
+        self.plotButton.setMinimumHeight(20)
+        self.plotButton.clicked.connect(self.plotData)
+
+        self.figure = go.Figure()
+        self.canvas = QWebEngineView(self)
+        
+        layout = QGridLayout()
+        layout.addWidget(self.fileLabel, 0, 0)
+        layout.addWidget(self.browseButton, 1, 0)
+
+        self.valueEdits = {}
+        for i, (group, labels) in enumerate(self.labels.items()):
+            for j, label in enumerate(labels):
+                layout.addWidget(QLabel(label+':'), i+2, j*2)
+                self.valueEdits[self.func_args[group][j]] = QLineEdit(self.default_values[group][j], self)
+                self.valueEdits[self.func_args[group][j]].setMinimumHeight(20)
+                layout.addWidget(self.valueEdits[self.func_args[group][j]], i+2, j*2+1)
+
+        self.colorMapComboBox = QComboBox()
+        self.colorMapComboBox.addItems(self.color_maps)
+        layout.addWidget(QLabel('Color Map:'), i+3, 0)
+        layout.addWidget(self.colorMapComboBox, i+3, 1)
+
+        layout.addWidget(self.plotButton, i+4, 0)
+        layout.addWidget(self.canvas, i+5, 0, 4, 4)  # Adjust these values to change how the browser spans the layout
+
+        # Adjust the stretch factor for the browser row
+        layout.setRowStretch(i+5, 10)
+
+        widget = QWidget()
+        widget.setLayout(layout)
+
+        self.setCentralWidget(widget)
+
+    def browseDoseStateFile(self):
+        options = QFileDialog.Options()
+        options |= QFileDialog.ReadOnly
+        fileName, _ = QFileDialog.getOpenFileName(self, "Select file", rd3d_paths()['doseStateFilePath'], "All Files (*)", options=options)
+        if fileName:
+            self.filePath = fileName
+            self.fileLabel.setText(self.filePath)
+
+    def drawArrow(self, ax, min_x, max_x, min_y, max_y, min_z, max_z):
+        ### Not used, kept for reference
+        # Plot the 3D arrow made from a cylinder and a cone
+        center_x = (max_x + min_x) / 2
+        center_z = (max_z + min_z) / 2
+        arrow_radius = 0.02 * (max_y - min_y)  # adjust the size of the arrow based on the size of the data
+        arrow_length = 1.4 * (max_y - min_y)  # make the arrow 40% longer than the data volume
+        arrow_tip_height = 0.2 * arrow_length  # adjust the size of the arrow tip
+        arrow_start = min_y - 0.2 * (max_y - min_y)  # extend the arrow 20% before the data volume
+        arrow_end = max_y + 0.2 * (max_y - min_y)  # extend the arrow 20% after the data volume
+
+        # create the cylinder part of the arrow
+        y = np.linspace(arrow_start + arrow_tip_height, arrow_end, 100)
+        theta = np.linspace(0, 2.*np.pi, 40)
+        theta_grid, y_grid = np.meshgrid(theta, y)
+        x_grid = center_x + arrow_radius * np.cos(theta_grid)
+        z_grid = center_z + arrow_radius * np.sin(theta_grid)
+        ax.plot_surface(x_grid, y_grid, z_grid, color='r')
+
+        # create the cone part of the arrow (arrow tip)
+        y = np.linspace(arrow_start, arrow_start + arrow_tip_height, 100)
+        theta = np.linspace(0, 2.*np.pi, 40)
+        theta_grid, y_grid = np.meshgrid(theta, y)
+        radius = arrow_radius * ((y_grid - arrow_start) / arrow_tip_height)
+        x_grid = center_x + radius * np.cos(theta_grid)
+        z_grid = center_z + radius * np.sin(theta_grid)
+        ax.plot_surface(x_grid, y_grid, z_grid, color='r')
+
+    def getShape(self, data):
+        return [len(np.unique(data[:,i])) for i in range(3)]
+
+    def drawMesh(self, cx, cy, cz, dose, doseLevel, voxel_spacing, alpha, colorscale_name, color_value):
+        # Adjust this method for Plotly
+        shape = self.getShape(np.vstack((cx, cy, cz)).T)
+        verts, faces, _, _ = measure.marching_cubes(dose.reshape(shape), level=doseLevel, spacing=voxel_spacing)
+        i, j, k = zip(*faces)
+        x, y, z = zip(*verts)
+        
+        colorscale = get_colorscale(colorscale_name)
+        color = colorscale[int(color_value * (len(colorscale) - 1))]
+        mesh = go.Mesh3d(x=x, y=y, z=z, i=i, j=j, k=k, opacity=alpha, color=color[1])
+        return mesh, verts
+    
+    def plotData(self):
+        cx, cy, cz, dose = np.genfromtxt(self.filePath, delimiter=',', usecols=(0,1,2,3), unpack=True, dtype=None)
+        PIXELSPERMICRON = 0.5
+        voxel_spacing = tuple(np.ones(3)/PIXELSPERMICRON)
+
+        cmap = self.colorMapComboBox.currentText()
+
+        doseLevel1 = float(self.valueEdits['doseLevel1'].text())
+        alpha1 = float(self.valueEdits['alpha1'].text())
+        mesh1, verts1 = self.drawMesh(cx, cy, cz, dose, doseLevel1, voxel_spacing, alpha1, cmap, 0.33)
+
+        doseLevel2 = float(self.valueEdits['doseLevel2'].text())
+        alpha2 = float(self.valueEdits['alpha2'].text())
+        mesh2, verts2 = self.drawMesh(cx, cy, cz, dose, doseLevel2, voxel_spacing, alpha2, cmap, 0.66)
+
+        fig = go.Figure()
+        fig.add_trace(mesh1)
+        fig.add_trace(mesh2)
+
+        # Calculate the range of data in each dimension
+        range_x = np.max(verts1[:,0]) - np.min(verts1[:,0])
+        range_y = np.max(verts1[:,1]) - np.min(verts1[:,1])
+        range_z = np.max(verts1[:,2]) - np.min(verts1[:,2])
+        
+        # Find the maximum range among the three dimensions
+        max_range = max(range_x, range_y, range_z)
+        
+        # Calculate the aspect ratio for each axis
+        aspect_ratio_x = range_x / max_range
+        aspect_ratio_y = range_y / max_range
+        aspect_ratio_z = range_z / max_range
+        
+        fig.update_layout(
+            scene=dict(
+                xaxis=dict(nticks=4, range=[np.min(verts1[:,0]), np.max(verts1[:,0])]),
+                yaxis=dict(nticks=4, range=[np.min(verts1[:,1]), np.max(verts1[:,1])]),
+                zaxis=dict(nticks=4, range=[np.min(verts1[:,2]), np.max(verts1[:,2])]),
+                aspectmode='manual',
+                aspectratio=dict(x=aspect_ratio_x, y=aspect_ratio_y, z=aspect_ratio_z)
+            )
+        )
+        raw_html = '<html><head><meta charset="utf-8" />'
+        raw_html += '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script></head>'
+        raw_html += '<body>'
+        raw_html += io.to_html(fig, include_plotlyjs=False, full_html=False)
+        raw_html += '</body></html>'
+        
+        self.canvas.setHtml(raw_html)
 
 class MainWindow(QWidget):
     def __init__(self):
@@ -425,18 +627,19 @@ class MainWindow(QWidget):
 
         self.layout = QVBoxLayout()
 
-        self.labels = {'Beam': ['Flux [ph/s]', 'Energy [keV]', 'Beam Size V [um]', 'Beam Size H [um]', 'Crystal Size V [um]'],
+        self.labels = {'Beam': ['Flux [ph/s]', 'Energy [keV]', 'Beam Size V [um]', 'Beam Size H [um]', 'Crystal Size V [um]', 'Crystal Size B [um]'],
                        'Collection': ['Osc Range [deg]', 'Osc Width [deg]', 'Exposure Time / Frame [s]', 'Vector Length [um]']}
 
-        self.func_args = {'Beam': ['flux', 'energy', 'beamsizeV', 'beamsizeH', 'xtalSizeV'],
+        self.func_args = {'Beam': ['flux', 'energy', 'beamsizeV', 'beamsizeH', 'xtalSizeV', 'xtalSizeB'],
                           'Collection': ['oscRange', 'oscWidth', 'exposureTimeFrame', 'vectorL']}
 
-        self.default_values = {'Beam': ['1e12', '12.66', '3.0', '5.0', '-1'],
+        self.default_values = {'Beam': ['1e12', '12.66', '3.0', '5.0', '-1', '-1'],
                                'Collection': ['180', '0.1', '0.02', '50']}
 
         self.tooltips = {'Beam': ['Set to -1 to read the current flux at the sample position',
                                   None, None, None,
-                                  'If set to -1, vertical crystal size is set equal to Beam Size V'],
+                                  'If set to -1, vertical crystal size is set equal to Beam Size V',
+                                  'If set to -1, crystal size along beam is set equal to vertical crystal size'],
                  'Collection': [None, None, None, None]}
         
         self.text_fields = {}
@@ -505,9 +708,14 @@ class MainWindow(QWidget):
         grid.addWidget(self.save_button, 4, 5, 1, 2)
         self.save_button.clicked.connect(self.on_save_button_clicked)
 
-        self.settings = QSettings('OpenAI', 'rd3dgui')
-        self.save_dir = self.settings.value('save_dir', os.path.dirname(os.path.abspath('./rd3d_work')))
+        self.iso_button = QPushButton('Launch Isosurface Visualization')
+        self.iso_button.setStyleSheet("background-color: lightyellow")
+        grid.addWidget(self.iso_button, 5, 5, 1, 2)
+        self.iso_button.clicked.connect(self.launch_isosurface_visualization)
         
+        self.settings = QSettings('RADDOSE3D', 'rd3dgui')  # First arg is the "organization"
+        self.save_dir = self.settings.value('save_dir', os.getcwd())  # initially point to the user's current working directory
+
         self.plotCanvas = PlotCanvas(self)
         self.layout.addWidget(self.plotCanvas)
         
@@ -572,24 +780,25 @@ class MainWindow(QWidget):
                 self.settings.setValue('save_dir', self.save_dir)
     
                 # Create the zip file of the working directory "rd3d_work" directly in the selected location
+                rd3d_work_dir = rd3d_paths()["workDir"]
                 with zipfile.ZipFile(save_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for root, dirs, files in os.walk('./rd3d_work'):
+                    for root, dirs, files in os.walk(rd3d_work_dir):
                         for file in files:
                             # Correct the file path for the zip
-                            arcname = os.path.relpath(os.path.join(root, file), './rd3d_work')
+                            arcname = os.path.relpath(os.path.join(root, file), rd3d_work_dir)
                             zipf.write(os.path.join(root, file), arcname=arcname)
         except Exception as e:
             self.result_value.setText(f"Error: {str(e)}")
             return
+            
+    def launch_isosurface_visualization(self):
+        self.iso_window = IsosurfaceVisualizationApp()
+        self.iso_window.show()
         
     def on_browse_button_clicked(self, field_name):
         file_dialog = QFileDialog()
-        file_name, _ = file_dialog.getOpenFileName(self, 'Open file', './rd3d_bin/')
+        file_name, _ = file_dialog.getOpenFileName(self, 'Open file', rd3d_paths()['workDir'])
         if file_name:
-            # Convert the absolute path to a path relative to the './rd3d_bin/' directory
-            rd3d_dir = QDir(os.path.join(os.getcwd(), 'rd3d_bin'))
-            file_name = rd3d_dir.relativeFilePath(file_name)
-
             # Update the 'templateFileName' or 'pdb' field
             self.text_fields[field_name].setText(file_name)
             # Set tooltip
